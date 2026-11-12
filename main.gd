@@ -7,6 +7,13 @@ const CORE_POS := Vector2(640.0, 360.0)
 const CORE_RADIUS := 42.0
 const BOSS_TIME := 420.0
 const MAX_RUN_TIME := 600.0
+const MAX_ENEMIES := 180
+const MAX_BULLETS := 320
+const MAX_XP_ORBS := 260
+const MAX_SPARKS := 520
+const MAX_DAMAGE_NUMBERS := 140
+const MAX_ARC_EFFECTS := 80
+const SAVE_PATH := "user://last_defense_save.cfg"
 
 var player_pos := Vector2(640.0, 470.0)
 var player_hp := 100.0
@@ -53,6 +60,11 @@ var event_timer := 55.0
 var damage_boost_timer := 0.0
 var hazard_tick := 0.0
 var nearby_terminal := ""
+var result_recorded := false
+var best_kills := 0
+var best_time := 0.0
+var total_runs := 0
+var total_wins := 0
 
 var enemies: Array[Dictionary] = []
 var bullets: Array[Dictionary] = []
@@ -85,6 +97,7 @@ var upgrades: Array[Dictionary] = [
 ]
 
 func _ready() -> void:
+	load_progress()
 	load_visual_assets()
 	setup_audio()
 	create_starfield()
@@ -104,6 +117,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			start_game()
 		elif game_over and event.keycode == KEY_R:
 			start_game()
+		elif (game_over or game_paused) and event.keycode == KEY_Q:
+			return_to_title()
 		elif game_started and not game_over and not choosing_upgrade and event.keycode == KEY_ESCAPE:
 			game_paused = not game_paused
 			play_sfx("pickup")
@@ -120,6 +135,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			activate_nearby_terminal()
 		elif event.keycode == KEY_M:
 			sound_enabled = not sound_enabled
+			save_progress()
 
 func _process(delta: float) -> void:
 	animation_time += delta
@@ -136,8 +152,7 @@ func _process(delta: float) -> void:
 
 	elapsed += delta
 	if elapsed >= MAX_RUN_TIME:
-		victory = false
-		game_over = true
+		finish_run(false)
 		queue_redraw()
 		return
 	update_boss_schedule()
@@ -153,11 +168,55 @@ func _process(delta: float) -> void:
 	update_sparks(delta)
 	update_arc_effects(delta)
 	if player_hp <= 0.0 or core_hp <= 0.0:
-		game_over = true
-		announcement_text = "SIGNAL LOST"
-		announcement_time = 2.0
-		play_sfx("damage")
+		finish_run(false)
 	queue_redraw()
+
+func load_progress() -> void:
+	var config := ConfigFile.new()
+	if config.load(SAVE_PATH) != OK:
+		return
+	best_kills = int(config.get_value("records", "best_kills", 0))
+	best_time = float(config.get_value("records", "best_time", 0.0))
+	total_runs = int(config.get_value("records", "total_runs", 0))
+	total_wins = int(config.get_value("records", "total_wins", 0))
+	sound_enabled = bool(config.get_value("settings", "sound_enabled", true))
+
+func save_progress() -> void:
+	var config := ConfigFile.new()
+	config.set_value("records", "best_kills", best_kills)
+	config.set_value("records", "best_time", best_time)
+	config.set_value("records", "total_runs", total_runs)
+	config.set_value("records", "total_wins", total_wins)
+	config.set_value("settings", "sound_enabled", sound_enabled)
+	config.save(SAVE_PATH)
+
+func finish_run(won: bool) -> void:
+	if result_recorded:
+		return
+	result_recorded = true
+	victory = won
+	game_over = true
+	total_runs += 1
+	if won:
+		total_wins += 1
+	best_kills = max(best_kills, kills)
+	best_time = max(best_time, elapsed)
+	announcement_text = "CORE SECURED" if won else "SIGNAL LOST"
+	announcement_time = 4.0 if won else 2.0
+	if won:
+		screen_shake = 18.0
+		play_sfx("victory")
+	else:
+		play_sfx("damage")
+	save_progress()
+
+func return_to_title() -> void:
+	game_started = false
+	game_paused = false
+	game_over = false
+	choosing_upgrade = false
+	announcement_text = ""
+	announcement_time = 0.0
 
 func setup_audio() -> void:
 	var audio_files := {
@@ -344,6 +403,8 @@ func update_boss_schedule() -> void:
 		spawn_boss()
 
 func spawn_boss() -> void:
+	if enemies.size() >= MAX_ENEMIES:
+		enemies.pop_front()
 	boss_spawned = true
 	boss_alive = true
 	boss_max_hp = 1650.0
@@ -367,6 +428,8 @@ func spawn_boss() -> void:
 	})
 
 func spawn_enemy(elite: bool = false) -> void:
+	if enemies.size() >= MAX_ENEMIES:
+		return
 	var side := randi() % 4
 	var pos := Vector2.ZERO
 	match side:
@@ -423,6 +486,8 @@ func update_shooting(delta: float) -> void:
 	if nearest_index >= 0:
 		var base_direction: Vector2 = (enemies[nearest_index]["pos"] - player_pos).normalized()
 		for i in range(projectile_count):
+			if bullets.size() >= MAX_BULLETS:
+				break
 			var spread := (float(i) - float(projectile_count - 1) * 0.5) * 0.14
 			var direction := base_direction.rotated(spread)
 			var boosted_damage := shot_damage * (1.35 if damage_boost_timer > 0.0 else 1.0)
@@ -454,7 +519,7 @@ func update_arc_weapon(delta: float) -> void:
 		var target_ref: Dictionary = enemies[target_index]
 		var target_pos: Vector2 = target_ref["pos"]
 		hit_targets.append(target_ref)
-		arc_effects.append({"from": current_pos, "to": target_pos, "life": 0.16})
+		append_arc_effect(current_pos, target_pos, 0.16)
 		var arc_damage := 6.0 + float(arc_level) * 3.5
 		damage_enemy(target_index, arc_damage)
 		current_pos = target_pos
@@ -475,7 +540,7 @@ func chain_from(origin: Vector2, excluded_index: int, damage: float, jumps: int)
 		if target_index < 0:
 			return
 		var target_pos: Vector2 = enemies[target_index]["pos"]
-		arc_effects.append({"from": current_pos, "to": target_pos, "life": 0.13})
+		append_arc_effect(current_pos, target_pos, 0.13)
 		damage_enemy(target_index, damage)
 		current_pos = target_pos
 
@@ -526,6 +591,8 @@ func damage_enemy(index: int, amount: float) -> bool:
 	if index < 0 or index >= enemies.size():
 		return false
 	var number_pos: Vector2 = enemies[index]["pos"] + Vector2(randf_range(-7.0, 7.0), -12.0)
+	if damage_numbers.size() >= MAX_DAMAGE_NUMBERS:
+		damage_numbers.pop_front()
 	damage_numbers.append({"pos": number_pos, "value": int(round(amount)), "life": 0.55, "color": enemy_color(enemies[index]["type"])})
 	enemies[index]["hp"] -= amount
 	play_sfx("hit")
@@ -540,18 +607,15 @@ func damage_enemy(index: int, amount: float) -> bool:
 		orb_value = 5
 	elif dead_type == "boss":
 		orb_value = 12
+	if xp_orbs.size() >= MAX_XP_ORBS:
+		xp_orbs.pop_front()
 	xp_orbs.append({"pos": dead_pos, "value": orb_value})
 	create_spark(dead_pos, enemy_color(dead_type), 12 if dead_type == "boss" else 9)
 	enemies.remove_at(index)
 	kills += 1
 	if dead_type == "boss":
 		boss_alive = false
-		victory = true
-		game_over = true
-		screen_shake = 18.0
-		announcement_text = "CORE SECURED"
-		announcement_time = 4.0
-		play_sfx("victory")
+		finish_run(true)
 	return true
 
 func update_enemies(delta: float) -> void:
@@ -613,6 +677,8 @@ func update_boss_enemy(index: int, delta: float) -> void:
 
 func create_spark(pos: Vector2, color: Color, count: int = 4) -> void:
 	for i in range(count):
+		if sparks.size() >= MAX_SPARKS:
+			sparks.pop_front()
 		var angle := randf() * TAU
 		sparks.append({
 			"pos": pos,
@@ -620,6 +686,11 @@ func create_spark(pos: Vector2, color: Color, count: int = 4) -> void:
 			"life": randf_range(0.18, 0.45),
 			"color": color
 		})
+
+func append_arc_effect(from: Vector2, to: Vector2, life: float) -> void:
+	if arc_effects.size() >= MAX_ARC_EFFECTS:
+		arc_effects.pop_front()
+	arc_effects.append({"from": from, "to": to, "life": life})
 
 func update_xp_orbs(delta: float) -> void:
 	for i in range(xp_orbs.size() - 1, -1, -1):
@@ -758,6 +829,7 @@ func reset_game() -> void:
 	game_over = false
 	victory = false
 	choosing_upgrade = false
+	result_recorded = false
 	enemies.clear()
 	bullets.clear()
 	sparks.clear()
@@ -878,7 +950,8 @@ func _draw() -> void:
 		var result_color := Color("64ff9d") if victory else Color("ff6b81")
 		draw_string(ThemeDB.fallback_font, Vector2(0, 300), result_title, HORIZONTAL_ALIGNMENT_CENTER, 1280, 40, result_color)
 		draw_string(ThemeDB.fallback_font, Vector2(0, 350), "Survived %.1f seconds  •  Level %d  •  %d enemies destroyed" % [elapsed, level, kills], HORIZONTAL_ALIGNMENT_CENTER, 1280, 20, Color("d7e8ff"))
-		draw_string(ThemeDB.fallback_font, Vector2(0, 410), "[ R ]  DEPLOY AGAIN", HORIZONTAL_ALIGNMENT_CENTER, 1280, 22, Color("72f8ff"))
+		draw_string(ThemeDB.fallback_font, Vector2(0, 382), "BEST  %.1fs  •  %d kills  •  %d wins / %d runs" % [best_time, best_kills, total_wins, total_runs], HORIZONTAL_ALIGNMENT_CENTER, 1280, 16, Color("9fb2cb"))
+		draw_string(ThemeDB.fallback_font, Vector2(0, 430), "[ R ]  DEPLOY AGAIN     [ Q ]  TITLE", HORIZONTAL_ALIGNMENT_CENTER, 1280, 22, Color("72f8ff"))
 
 func draw_starfield() -> void:
 	draw_rect(Rect2(0, 0, SCREEN.x, SCREEN.y), Color("070b18"))
@@ -898,6 +971,7 @@ func draw_title_screen() -> void:
 	draw_rect(Rect2(455, 500, 370, 58), Color(0.06, 0.17, 0.28, 0.92))
 	draw_rect(Rect2(455, 500, 370, 58), Color("4fd9ff"), false, 2.0)
 	draw_string(ThemeDB.fallback_font, Vector2(455, 537), "[ ENTER ]  INITIALIZE DEFENSE", HORIZONTAL_ALIGNMENT_CENTER, 370, 20, Color(0.75, 0.96, 1.0, blink))
+	draw_string(ThemeDB.fallback_font, Vector2(0, 585), "RECORD  %.1fs  •  %d kills  •  %d wins / %d runs" % [best_time, best_kills, total_wins, total_runs], HORIZONTAL_ALIGNMENT_CENTER, 1280, 15, Color("91a9c7"))
 	draw_string(ThemeDB.fallback_font, Vector2(0, 620), "MOVE: WASD / ARROWS     •     INTERACT: E     •     ESC TO PAUSE", HORIZONTAL_ALIGNMENT_CENTER, 1280, 14, Color("7185a6"))
 
 func draw_damage_vignette() -> void:
@@ -924,6 +998,7 @@ func draw_pause_menu() -> void:
 	draw_string(ThemeDB.fallback_font, Vector2(0, 285), "DEFENSE PAUSED", HORIZONTAL_ALIGNMENT_CENTER, 1280, 38, Color("dff9ff"))
 	draw_string(ThemeDB.fallback_font, Vector2(0, 345), "[ ENTER / ESC ]  RESUME", HORIZONTAL_ALIGNMENT_CENTER, 1280, 20, Color("72f8ff"))
 	draw_string(ThemeDB.fallback_font, Vector2(0, 386), "[ M ]  SOUND: %s" % ("ON" if sound_enabled else "OFF"), HORIZONTAL_ALIGNMENT_CENTER, 1280, 17, Color("9fb2cb"))
+	draw_string(ThemeDB.fallback_font, Vector2(0, 425), "[ Q ]  RETURN TO TITLE", HORIZONTAL_ALIGNMENT_CENTER, 1280, 17, Color("9fb2cb"))
 
 func draw_arena_features() -> void:
 	for hazard in hazards:

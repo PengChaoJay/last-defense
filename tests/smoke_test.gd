@@ -8,6 +8,7 @@ func run_test() -> void:
 	var game: Node = scene.instantiate()
 	root.add_child(game)
 
+	game.sound_enabled = false
 	game.start_game()
 	game.open_upgrade_menu()
 	game.choose_upgrade(0)
@@ -22,6 +23,10 @@ func run_test() -> void:
 	game.activate_nearby_terminal()
 	game.spawn_enemy(true)
 	game.spawn_boss()
+	for i in range(240):
+		game.spawn_enemy()
+	for i in range(700):
+		game.create_spark(Vector2.ZERO, Color.WHITE, 1)
 
 	for frame in range(180):
 		await process_frame
@@ -46,11 +51,22 @@ func run_test() -> void:
 		push_error("Arena features are incomplete")
 		quit(1)
 		return
+	if game.enemies.size() > game.MAX_ENEMIES:
+		push_error("Enemy cap was exceeded")
+		quit(1)
+		return
+	if game.sparks.size() > game.MAX_SPARKS:
+		push_error("Spark cap was exceeded")
+		quit(1)
+		return
 
 	print("SMOKE_TEST_OK enemies=", game.enemies.size(), " bullets=", game.bullets.size())
-	game.queue_free()
-	await process_frame
+	for player in game.sfx.values():
+		player.stop()
+	game.sfx.clear()
+	game.free()
 	game = null
 	scene = null
-	await process_frame
+	for frame in range(3):
+		await process_frame
 	quit(0)

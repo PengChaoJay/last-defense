@@ -30,6 +30,7 @@
 | `Esc` | 暂停 / 继续 |
 | `M` | 开关音效 |
 | `R` | 结算后重新开始 |
+| `Q` | 暂停或结算时返回标题页 |
 
 武器会自动攻击最近的敌人。玩家或能源核心生命归零时失败；第 7 分钟 Boss 登场，击败 Boss 胜利，最迟第 10 分钟结算失败。
 
@@ -58,6 +59,7 @@ Windows PowerShell：
 - [项目整体架构](docs/ARCHITECTURE.md)
 - [完整玩法说明](docs/GAMEPLAY.md)
 - [GitHub 上传与发布清单](docs/GITHUB_RELEASE.md)
+- [开发日志](docs/DEVELOPMENT_LOG.md)
 
 ## 项目结构
 
@@ -108,6 +110,8 @@ last-defense/
 - [x] 随机事件、精英敌人和 Boss
 - [x] 基础 UI、音效和战斗反馈
 - [x] 自动冒烟测试
+- [x] 战绩与设置持久化
+- [x] 极端对象数量保护
 - [ ] 正式动画与完整美术
 - [ ] 数值平衡与性能分析
 - [ ] 多人试玩与反馈统计
