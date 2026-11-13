@@ -56,6 +56,10 @@ var core_flash := 0.0
 var announcement_text := ""
 var announcement_time := 0.0
 var sound_enabled := true
+var screen_shake_enabled := true
+var tutorial_completed := false
+var tutorial_step := 0
+var stage_index := 0
 var event_timer := 55.0
 var damage_boost_timer := 0.0
 var hazard_tick := 0.0
@@ -65,6 +69,15 @@ var best_kills := 0
 var best_time := 0.0
 var total_runs := 0
 var total_wins := 0
+var selected_mode := "normal"
+var boss_wave := 1
+var next_boss_time := BOSS_TIME
+var rare_execution := false
+var rare_reactive := false
+var rare_vampiric := false
+var rare_terminal_mastery := false
+var reactive_cooldown := 0.0
+var terminal_damage_bonus := 0.0
 
 var enemies: Array[Dictionary] = []
 var bullets: Array[Dictionary] = []
@@ -78,6 +91,7 @@ var sfx: Dictionary = {}
 var obstacles: Array[Dictionary] = []
 var hazards: Array[Dictionary] = []
 var terminals: Array[Dictionary] = []
+var defense_modules: Array[Dictionary] = []
 var player_texture: Texture2D
 var enemy_normal_texture: Texture2D
 var enemy_heavy_texture: Texture2D
@@ -93,7 +107,16 @@ var upgrades: Array[Dictionary] = [
 	{"id": "magnet", "name": "MAGNET", "desc": "Pickup range +35%"},
 	{"id": "energy", "name": "ENERGY CANNON", "desc": "Energy weapon level +1"},
 	{"id": "arc", "name": "ARC MODULE", "desc": "Unlock or improve chain lightning"},
-	{"id": "orbit", "name": "ORBIT BLADES", "desc": "Unlock or improve orbiting blades"}
+	{"id": "orbit", "name": "ORBIT BLADES", "desc": "Unlock or improve orbiting blades"},
+	{"id": "defense_turret", "name": "SENTRY TURRET", "desc": "Install or upgrade an automatic core turret"},
+	{"id": "defense_slow", "name": "STASIS PYLON", "desc": "Install or upgrade a slowing field"},
+	{"id": "defense_repair", "name": "REPAIR DRONE", "desc": "Install or upgrade automatic core repair"}
+]
+var rare_upgrades: Array[Dictionary] = [
+	{"id": "execution_protocol", "name": "EXECUTION PROTOCOL", "desc": "RARE: +60% damage, but -25 max HP", "rarity": "rare"},
+	{"id": "reactive_core", "name": "REACTIVE CORE", "desc": "RARE: core damage releases a defensive EMP", "rarity": "rare"},
+	{"id": "vampiric_cells", "name": "VAMPIRIC CELLS", "desc": "RARE: every 12 kills restores armor", "rarity": "rare"},
+	{"id": "terminal_mastery", "name": "TERMINAL MASTERY", "desc": "RARE: terminals permanently amplify damage", "rarity": "rare"}
 ]
 
 func _ready() -> void:
@@ -115,6 +138,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if not game_started and event.keycode == KEY_ENTER:
 			start_game()
+		elif not game_started and event.keycode in [KEY_1, KEY_2, KEY_3]:
+			selected_mode = ["normal", "challenge", "endless"][event.keycode - KEY_1]
+			play_sfx("pickup")
 		elif game_over and event.keycode == KEY_R:
 			start_game()
 		elif (game_over or game_paused) and event.keycode == KEY_Q:
@@ -136,6 +162,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.keycode == KEY_M:
 			sound_enabled = not sound_enabled
 			save_progress()
+		elif event.keycode == KEY_V:
+			screen_shake_enabled = not screen_shake_enabled
+			save_progress()
+		elif event.keycode == KEY_F11:
+			toggle_fullscreen()
+		elif not game_started and event.keycode == KEY_T:
+			tutorial_completed = false
+			tutorial_step = 0
+			save_progress()
 
 func _process(delta: float) -> void:
 	animation_time += delta
@@ -151,12 +186,15 @@ func _process(delta: float) -> void:
 		return
 
 	elapsed += delta
-	if elapsed >= MAX_RUN_TIME:
+	reactive_cooldown = max(0.0, reactive_cooldown - delta)
+	update_stage()
+	if selected_mode != "endless" and elapsed >= MAX_RUN_TIME:
 		finish_run(false)
 		queue_redraw()
 		return
 	update_boss_schedule()
 	update_arena_features(delta)
+	update_defense_modules(delta)
 	update_player(delta)
 	update_spawning(delta)
 	update_shooting(delta)
@@ -180,6 +218,8 @@ func load_progress() -> void:
 	total_runs = int(config.get_value("records", "total_runs", 0))
 	total_wins = int(config.get_value("records", "total_wins", 0))
 	sound_enabled = bool(config.get_value("settings", "sound_enabled", true))
+	screen_shake_enabled = bool(config.get_value("settings", "screen_shake_enabled", true))
+	tutorial_completed = bool(config.get_value("progress", "tutorial_completed", false))
 
 func save_progress() -> void:
 	var config := ConfigFile.new()
@@ -188,7 +228,42 @@ func save_progress() -> void:
 	config.set_value("records", "total_runs", total_runs)
 	config.set_value("records", "total_wins", total_wins)
 	config.set_value("settings", "sound_enabled", sound_enabled)
+	config.set_value("settings", "screen_shake_enabled", screen_shake_enabled)
+	config.set_value("progress", "tutorial_completed", tutorial_completed)
 	config.save(SAVE_PATH)
+
+func toggle_fullscreen() -> void:
+	if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	else:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+
+func update_stage() -> void:
+	var next_stage := 0
+	if elapsed >= 300.0:
+		next_stage = 2
+	elif elapsed >= 120.0:
+		next_stage = 1
+	if next_stage == stage_index:
+		return
+	stage_index = next_stage
+	if stage_index == 1:
+		announcement_text = "PHASE II: ESCALATION"
+	else:
+		announcement_text = "PHASE III: FINAL ASSAULT"
+	announcement_time = 2.8
+	play_sfx("boss")
+
+func stage_name() -> String:
+	if selected_mode == "endless" and boss_wave > 1:
+		return "ENDLESS WAVE %d" % boss_wave
+	if boss_spawned:
+		return "BOSS: SIEGE TITAN"
+	if stage_index == 2:
+		return "PHASE III: FINAL ASSAULT"
+	if stage_index == 1:
+		return "PHASE II: ESCALATION"
+	return "PHASE I: BREACH"
 
 func finish_run(won: bool) -> void:
 	if result_recorded:
@@ -255,9 +330,21 @@ func start_game() -> void:
 	reset_game()
 	game_started = true
 	game_paused = false
+	tutorial_step = -1 if tutorial_completed else 0
 	announcement_text = "DEFEND THE CORE"
 	announcement_time = 2.2
 	play_sfx("upgrade")
+
+func advance_tutorial(expected_step: int) -> void:
+	if tutorial_completed or tutorial_step != expected_step:
+		return
+	tutorial_step += 1
+	if tutorial_step >= 4:
+		tutorial_completed = true
+		tutorial_step = -1
+		announcement_text = "TRAINING COMPLETE"
+		announcement_time = 2.0
+		save_progress()
 
 func update_feedback(delta: float) -> void:
 	screen_shake = max(0.0, screen_shake - delta * 24.0)
@@ -288,6 +375,61 @@ func setup_arena_features() -> void:
 		{"id": "weapon", "name": "OVERCHARGE", "pos": Vector2(1160, 170), "cooldown": 0.0, "max_cd": 60.0, "color": Color("ffcf70")},
 		{"id": "supply", "name": "MED STATION", "pos": Vector2(640, 650), "cooldown": 0.0, "max_cd": 40.0, "color": Color("72f8ff")}
 	]
+	defense_modules = [
+		{"pos": Vector2(640, 255), "type": "", "level": 0, "cooldown": 0.0},
+		{"pos": Vector2(550, 415), "type": "", "level": 0, "cooldown": 0.0},
+		{"pos": Vector2(730, 415), "type": "", "level": 0, "cooldown": 0.0}
+	]
+
+func update_defense_modules(delta: float) -> void:
+	for module in defense_modules:
+		if module["type"].is_empty():
+			continue
+		module["cooldown"] = max(0.0, module["cooldown"] - delta)
+		if module["type"] == "repair":
+			if module["cooldown"] <= 0.0 and core_hp < 300.0:
+				core_hp = min(300.0, core_hp + 2.0 + float(module["level"]) * 1.5)
+				module["cooldown"] = max(1.5, 4.0 - float(module["level"]) * 0.35)
+				create_spark(CORE_POS, Color("64ff9d"), 5)
+		elif module["type"] == "turret" and module["cooldown"] <= 0.0:
+			var target_index := find_nearest_enemy(module["pos"], 270.0 + float(module["level"]) * 18.0)
+			if target_index >= 0:
+				var target_pos: Vector2 = enemies[target_index]["pos"]
+				append_arc_effect(module["pos"], target_pos, 0.10)
+				damage_enemy(target_index, 8.0 + float(module["level"]) * 4.0)
+				module["cooldown"] = max(0.24, 0.80 - float(module["level"]) * 0.08)
+
+func find_nearest_enemy(origin: Vector2, search_range: float) -> int:
+	var target_index := -1
+	var best_distance := search_range * search_range
+	for i in range(enemies.size()):
+		var distance: float = origin.distance_squared_to(enemies[i]["pos"])
+		if distance < best_distance:
+			best_distance = distance
+			target_index = i
+	return target_index
+
+func defense_slow_multiplier(pos: Vector2) -> float:
+	var multiplier := 1.0
+	for module in defense_modules:
+		if module["type"] != "slow":
+			continue
+		var effect_range: float = 125.0 + float(module["level"]) * 18.0
+		if pos.distance_to(module["pos"]) < effect_range:
+			multiplier = min(multiplier, max(0.38, 0.72 - float(module["level"]) * 0.06))
+	return multiplier
+
+func install_defense_module(module_type: String) -> void:
+	for module in defense_modules:
+		if module["type"] == module_type:
+			module["level"] = min(5, int(module["level"]) + 1)
+			return
+	for module in defense_modules:
+		if module["type"].is_empty():
+			module["type"] = module_type
+			module["level"] = 1
+			module["cooldown"] = 0.0
+			return
 
 func update_arena_features(delta: float) -> void:
 	damage_boost_timer = max(0.0, damage_boost_timer - delta)
@@ -319,6 +461,10 @@ func activate_nearby_terminal() -> void:
 			announcement_time = 1.2
 			return
 		if terminal["id"] == "repair":
+			if selected_mode == "challenge":
+				announcement_text = "REPAIR TERMINAL OFFLINE"
+				announcement_time = 1.5
+				return
 			core_hp = min(300.0, core_hp + 75.0)
 			announcement_text = "CORE INTEGRITY RESTORED"
 		elif terminal["id"] == "weapon":
@@ -328,9 +474,13 @@ func activate_nearby_terminal() -> void:
 			player_hp = min(player_max_hp, player_hp + 55.0)
 			announcement_text = "ARMOR RESTORED"
 		terminal["cooldown"] = terminal["max_cd"]
+		if rare_terminal_mastery:
+			terminal_damage_bonus += 0.05
+			shot_damage *= 1.05
 		announcement_time = 1.8
 		create_spark(terminal["pos"], terminal["color"], 16)
 		play_sfx("upgrade")
+		advance_tutorial(3)
 		return
 
 func trigger_random_event() -> void:
@@ -351,6 +501,8 @@ func trigger_random_event() -> void:
 
 func update_player(delta: float) -> void:
 	var direction := Input.get_vector("move_left", "move_right", "move_up", "move_down")
+	if direction.length_squared() > 0.01:
+		advance_tutorial(0)
 	var speed_factor := 1.0
 	for hazard in hazards:
 		if hazard["type"] == "slow" and player_pos.distance_to(hazard["pos"]) < hazard["radius"]:
@@ -399,7 +551,7 @@ func update_spawning(delta: float) -> void:
 		spawn_timer = max(0.30, 1.10 - elapsed * 0.0045)
 
 func update_boss_schedule() -> void:
-	if not boss_spawned and elapsed >= BOSS_TIME:
+	if not boss_alive and elapsed >= next_boss_time:
 		spawn_boss()
 
 func spawn_boss() -> void:
@@ -407,7 +559,7 @@ func spawn_boss() -> void:
 		enemies.pop_front()
 	boss_spawned = true
 	boss_alive = true
-	boss_max_hp = 1650.0
+	boss_max_hp = 1650.0 * (1.0 + float(boss_wave - 1) * 0.55)
 	announcement_text = "WARNING: TITAN SIGNAL"
 	announcement_time = 3.0
 	screen_shake = 14.0
@@ -417,7 +569,7 @@ func spawn_boss() -> void:
 		"hp": boss_max_hp,
 		"speed": 56.0,
 		"radius": 46.0,
-		"damage": 20.0,
+		"damage": 20.0 + float(boss_wave - 1) * 5.0,
 		"type": "boss",
 		"hit_cd": 0.0,
 		"orbit_cd": 0.0,
@@ -455,12 +607,16 @@ func spawn_enemy(elite: bool = false) -> void:
 		enemy_speed = 48.0
 		enemy_radius = 22.0
 		enemy_damage = 14.0
+	var affix := ""
 	if elite:
 		enemy_type = "elite"
 		enemy_hp = 220.0 + elapsed * 0.22
 		enemy_speed = 82.0
 		enemy_radius = 27.0
 		enemy_damage = 18.0
+		affix = ["shield", "split", "frenzy", "healer", "explosive"].pick_random()
+	if selected_mode == "challenge":
+		enemy_speed *= 1.25
 	enemies.append({
 		"pos": pos,
 		"hp": enemy_hp,
@@ -469,8 +625,23 @@ func spawn_enemy(elite: bool = false) -> void:
 		"damage": enemy_damage,
 		"type": enemy_type,
 		"hit_cd": 0.0,
-		"orbit_cd": 0.0
+		"orbit_cd": 0.0,
+		"affix": affix,
+		"shield": 100.0 if affix == "shield" else 0.0,
+		"heal_cd": 2.0
 	})
+
+func spawn_enemy_at(pos: Vector2, elite: bool = false) -> void:
+	var before := enemies.size()
+	spawn_enemy(elite)
+	if enemies.size() > before:
+		enemies[-1]["pos"] = pos
+
+func spawn_enemy_nests() -> void:
+	for pos in [Vector2(105, 570), Vector2(1175, 570)]:
+		if enemies.size() >= MAX_ENEMIES:
+			return
+		enemies.append({"pos": pos, "hp": 340.0, "speed": 0.0, "radius": 32.0, "damage": 0.0, "type": "nest", "hit_cd": 0.0, "orbit_cd": 0.0, "spawn_cd": randf_range(5.0, 8.0), "affix": "", "shield": 0.0, "heal_cd": 0.0})
 
 func update_shooting(delta: float) -> void:
 	shot_timer -= delta
@@ -590,6 +761,13 @@ func update_bullets(delta: float) -> void:
 func damage_enemy(index: int, amount: float) -> bool:
 	if index < 0 or index >= enemies.size():
 		return false
+	if float(enemies[index].get("shield", 0.0)) > 0.0:
+		var absorbed: float = min(amount, float(enemies[index]["shield"]))
+		enemies[index]["shield"] -= absorbed
+		amount -= absorbed
+		create_spark(enemies[index]["pos"], Color("72f8ff"), 4)
+		if amount <= 0.0:
+			return false
 	var number_pos: Vector2 = enemies[index]["pos"] + Vector2(randf_range(-7.0, 7.0), -12.0)
 	if damage_numbers.size() >= MAX_DAMAGE_NUMBERS:
 		damage_numbers.pop_front()
@@ -600,6 +778,7 @@ func damage_enemy(index: int, amount: float) -> bool:
 		return false
 	var dead_pos: Vector2 = enemies[index]["pos"]
 	var dead_type: String = enemies[index]["type"]
+	var dead_affix: String = enemies[index].get("affix", "")
 	var orb_value := 1
 	if dead_type == "heavy":
 		orb_value = 2
@@ -607,29 +786,75 @@ func damage_enemy(index: int, amount: float) -> bool:
 		orb_value = 5
 	elif dead_type == "boss":
 		orb_value = 12
+	elif dead_type == "nest":
+		orb_value = 8
 	if xp_orbs.size() >= MAX_XP_ORBS:
 		xp_orbs.pop_front()
 	xp_orbs.append({"pos": dead_pos, "value": orb_value})
 	create_spark(dead_pos, enemy_color(dead_type), 12 if dead_type == "boss" else 9)
 	enemies.remove_at(index)
 	kills += 1
+	if rare_vampiric and kills % 12 == 0:
+		player_hp = min(player_max_hp, player_hp + 18.0)
+	if dead_affix == "split":
+		for offset in [Vector2(-18, 0), Vector2(18, 0), Vector2(0, 18)]:
+			spawn_enemy_at(dead_pos + offset)
+	elif dead_affix == "explosive":
+		if dead_pos.distance_to(player_pos) < 145.0:
+			player_hp -= 22.0
+		if dead_pos.distance_to(CORE_POS) < 145.0:
+			damage_core(22.0)
+		create_spark(dead_pos, Color("ff6b4a"), 28)
 	if dead_type == "boss":
 		boss_alive = false
-		finish_run(true)
+		if selected_mode == "endless":
+			boss_wave += 1
+			next_boss_time = elapsed + 180.0
+			announcement_text = "TITAN DESTROYED // WAVE %d INCOMING" % boss_wave
+			announcement_time = 3.0
+		else:
+			finish_run(true)
 	return true
+
+func damage_core(amount: float) -> void:
+	core_hp -= amount
+	if rare_reactive and reactive_cooldown <= 0.0:
+		reactive_cooldown = 8.0
+		for i in range(enemies.size() - 1, -1, -1):
+			if enemies[i]["type"] != "nest" and enemies[i]["pos"].distance_to(CORE_POS) < 250.0:
+				damage_enemy(i, 70.0)
+		append_arc_effect(CORE_POS + Vector2(-100, 0), CORE_POS + Vector2(100, 0), 0.3)
 
 func update_enemies(delta: float) -> void:
 	for i in range(enemies.size() - 1, -1, -1):
+		if i >= enemies.size():
+			continue
 		enemies[i]["hit_cd"] = max(0.0, enemies[i]["hit_cd"] - delta)
-		if enemies[i]["type"] == "boss":
+		if enemies[i]["type"] == "nest":
+			enemies[i]["spawn_cd"] -= delta
+			if enemies[i]["spawn_cd"] <= 0.0:
+				spawn_enemy_at(enemies[i]["pos"] + Vector2(randf_range(-35, 35), randf_range(-35, 35)))
+				enemies[i]["spawn_cd"] = max(3.2, 7.5 - elapsed * 0.006)
+			continue
+		elif enemies[i]["type"] == "boss":
 			update_boss_enemy(i, delta)
 		else:
 			var to_player: float = enemies[i]["pos"].distance_to(player_pos)
 			var target := player_pos if to_player < 220.0 else CORE_POS
 			var direction: Vector2 = (target - enemies[i]["pos"]).normalized()
 			direction = steer_around_obstacles(enemies[i]["pos"], direction, enemies[i]["radius"])
-			enemies[i]["pos"] += direction * float(enemies[i]["speed"]) * delta
+			var slow_multiplier := defense_slow_multiplier(enemies[i]["pos"])
+			if enemies[i].get("affix", "") == "frenzy" and float(enemies[i]["hp"]) < 110.0:
+				slow_multiplier *= 1.65
+			enemies[i]["pos"] += direction * float(enemies[i]["speed"]) * slow_multiplier * delta
 			resolve_enemy_obstacle(i)
+			if enemies[i].get("affix", "") == "healer":
+				enemies[i]["heal_cd"] -= delta
+				if enemies[i]["heal_cd"] <= 0.0:
+					for ally in enemies:
+						if ally["pos"].distance_to(enemies[i]["pos"]) < 135.0:
+							ally["hp"] += 9.0
+					enemies[i]["heal_cd"] = 2.0
 		if enemies[i]["hit_cd"] <= 0.0:
 			if enemies[i]["pos"].distance_to(player_pos) < float(enemies[i]["radius"]) + PLAYER_RADIUS:
 				player_hp -= enemies[i]["damage"]
@@ -639,12 +864,13 @@ func update_enemies(delta: float) -> void:
 				screen_shake = max(screen_shake, 7.0)
 				play_sfx("damage")
 			elif enemies[i]["pos"].distance_to(CORE_POS) < float(enemies[i]["radius"]) + CORE_RADIUS:
-				core_hp -= enemies[i]["damage"]
+				var core_damage: float = enemies[i]["damage"]
 				enemies[i]["hit_cd"] = 0.65
 				create_spark(CORE_POS, Color("ffb347"), 5)
 				core_flash = 0.22
 				screen_shake = max(screen_shake, 5.0)
 				play_sfx("damage")
+				damage_core(core_damage)
 
 func update_boss_enemy(index: int, delta: float) -> void:
 	if index < 0 or index >= enemies.size():
@@ -666,7 +892,7 @@ func update_boss_enemy(index: int, delta: float) -> void:
 		var direction: Vector2 = (target - enemies[index]["pos"]).normalized()
 		direction = steer_around_obstacles(enemies[index]["pos"], direction, enemies[index]["radius"])
 		enemies[index]["charge_dir"] = direction
-		enemies[index]["pos"] += direction * enemies[index]["speed"] * delta
+		enemies[index]["pos"] += direction * enemies[index]["speed"] * defense_slow_multiplier(enemies[index]["pos"]) * delta
 		if enemies[index]["charge_cd"] <= 0.0:
 			enemies[index]["charge_dir"] = direction
 			enemies[index]["charge_time"] = 0.72
@@ -705,6 +931,7 @@ func update_xp_orbs(delta: float) -> void:
 
 func gain_xp(amount: int) -> void:
 	xp += amount
+	advance_tutorial(1)
 	if xp >= xp_needed and not choosing_upgrade:
 		xp -= xp_needed
 		level += 1
@@ -720,6 +947,8 @@ func open_upgrade_menu() -> void:
 		upgrade_options.append(upgrade.duplicate(true))
 	upgrade_options.shuffle()
 	upgrade_options.resize(3)
+	if randf() < 0.12:
+		upgrade_options[randi() % 3] = rare_upgrades.pick_random().duplicate(true)
 	if level == 2:
 		upgrade_options[0] = upgrades[7].duplicate(true)
 	elif level == 3:
@@ -752,7 +981,25 @@ func choose_upgrade(index: int) -> void:
 		arc_level = min(5, arc_level + 1)
 	elif upgrade_id == "orbit":
 		orbit_level = min(5, orbit_level + 1)
+	elif upgrade_id == "defense_turret":
+		install_defense_module("turret")
+	elif upgrade_id == "defense_slow":
+		install_defense_module("slow")
+	elif upgrade_id == "defense_repair":
+		install_defense_module("repair")
+	elif upgrade_id == "execution_protocol":
+		rare_execution = true
+		shot_damage *= 1.60
+		player_max_hp = max(35.0, player_max_hp - 25.0)
+		player_hp = min(player_hp, player_max_hp)
+	elif upgrade_id == "reactive_core":
+		rare_reactive = true
+	elif upgrade_id == "vampiric_cells":
+		rare_vampiric = true
+	elif upgrade_id == "terminal_mastery":
+		rare_terminal_mastery = true
 	refresh_fusions()
+	advance_tutorial(2)
 	play_sfx("upgrade")
 	announcement_text = upgrade_options[index]["name"] + " INSTALLED"
 	announcement_time = 1.5
@@ -763,7 +1010,18 @@ func refresh_fusions() -> void:
 	chain_pulse_active = arc_level >= 1 and multishot_upgrade_count >= 1
 	overload_blade_active = orbit_level >= 1 and damage_upgrade_count >= 1 and fire_rate_upgrade_count >= 1
 
+func build_fusion_name() -> String:
+	if chain_pulse_active and overload_blade_active:
+		return "Chain Pulse + Overload Blade"
+	if chain_pulse_active:
+		return "Chain Pulse"
+	if overload_blade_active:
+		return "Overload Blade"
+	return "No Fusion"
+
 func enemy_color(enemy_type: String) -> Color:
+	if enemy_type == "nest":
+		return Color("ff673d")
 	if enemy_type == "boss":
 		return Color("d94dff")
 	if enemy_type == "fast":
@@ -793,7 +1051,7 @@ func reset_game() -> void:
 	player_max_hp = 100.0
 	player_speed = 270.0
 	pickup_radius = 70.0
-	core_hp = 300.0
+	core_hp = 1.0 if selected_mode == "challenge" else 300.0
 	elapsed = 0.0
 	spawn_timer = 0.0
 	shot_timer = 0.0
@@ -811,6 +1069,14 @@ func reset_game() -> void:
 	boss_spawned = false
 	boss_alive = false
 	boss_max_hp = 1.0
+	boss_wave = 1
+	next_boss_time = BOSS_TIME
+	rare_execution = false
+	rare_reactive = false
+	rare_vampiric = false
+	rare_terminal_mastery = false
+	reactive_cooldown = 0.0
+	terminal_damage_bonus = 0.0
 	chain_pulse_active = false
 	overload_blade_active = false
 	event_timer = 55.0
@@ -830,6 +1096,7 @@ func reset_game() -> void:
 	victory = false
 	choosing_upgrade = false
 	result_recorded = false
+	stage_index = 0
 	enemies.clear()
 	bullets.clear()
 	sparks.clear()
@@ -839,8 +1106,13 @@ func reset_game() -> void:
 	damage_numbers.clear()
 	for terminal in terminals:
 		terminal["cooldown"] = 0.0
+	for module in defense_modules:
+		module["type"] = ""
+		module["level"] = 0
+		module["cooldown"] = 0.0
 	for i in range(6):
 		spawn_enemy()
+	spawn_enemy_nests()
 
 func _draw() -> void:
 	draw_starfield()
@@ -848,7 +1120,7 @@ func _draw() -> void:
 		draw_title_screen()
 		return
 	var shake_offset := Vector2.ZERO
-	if screen_shake > 0.0:
+	if screen_shake_enabled and screen_shake > 0.0:
 		shake_offset = Vector2(randf_range(-screen_shake, screen_shake), randf_range(-screen_shake, screen_shake))
 	draw_set_transform(shake_offset)
 	# arena grid
@@ -862,7 +1134,10 @@ func _draw() -> void:
 	draw_rect(Rect2(0, 0, 1280, 70), Color("10182b"))
 	draw_string(ThemeDB.fallback_font, Vector2(26, 33), "LAST DEFENSE  //  PRESENTATION BUILD", HORIZONTAL_ALIGNMENT_LEFT, -1, 21, Color("d9f5ff"))
 	draw_string(ThemeDB.fallback_font, Vector2(26, 57), "Move: WASD / Arrows  •  E terminal  •  ESC pause  •  M sound", HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color("8198b8"))
+	draw_string(ThemeDB.fallback_font, Vector2(500, 33), stage_name(), HORIZONTAL_ALIGNMENT_CENTER, 390, 16, Color("b5c9e8"))
 	var remaining: int = max(0, int(BOSS_TIME - elapsed))
+	if selected_mode == "endless":
+		remaining = max(0, int(next_boss_time - elapsed))
 	var objective_text := "BOSS IN %02d:%02d" % [int(remaining / 60.0), remaining % 60]
 	if boss_spawned:
 		objective_text = "DEFEAT THE BOSS"
@@ -876,6 +1151,7 @@ func _draw() -> void:
 	draw_texture_centered(core_texture, CORE_POS, 112.0, Color("fff3a6") if core_flash > 0.0 else Color.WHITE)
 	draw_string(ThemeDB.fallback_font, CORE_POS + Vector2(-42, 92), "ENERGY CORE", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color("71dfff"))
 	draw_bar(Vector2(535, 466), 210.0, core_hp / 300.0, Color("35c9ff"), "CORE %d" % max(0, int(core_hp)))
+	draw_defense_modules()
 
 	# entities
 	for orb in xp_orbs:
@@ -884,7 +1160,11 @@ func _draw() -> void:
 	for enemy in enemies:
 		var color := enemy_color(enemy["type"])
 		draw_circle(enemy["pos"], enemy["radius"] + 4.0, Color(color, 0.13))
-		if enemy["type"] == "boss":
+		if enemy["type"] == "nest":
+			draw_circle(enemy["pos"], 31.0 + sin(animation_time * 4.0) * 3.0, Color("ff673d"))
+			draw_arc(enemy["pos"], 42.0, animation_time, TAU + animation_time, 16, Color("ffcf70"), 4.0)
+			draw_string(ThemeDB.fallback_font, enemy["pos"] + Vector2(-30, 58), "NEST", HORIZONTAL_ALIGNMENT_CENTER, 60, 12, Color("ffcf70"))
+		elif enemy["type"] == "boss":
 			if enemy["charge_time"] <= 0.0 and enemy["charge_cd"] < 1.0:
 				var warning_end: Vector2 = enemy["pos"] + enemy["charge_dir"] * 520.0
 				draw_line(enemy["pos"], warning_end, Color(1.0, 0.15, 0.42, 0.25 + sin(animation_time * 16.0) * 0.12), 18.0)
@@ -894,6 +1174,9 @@ func _draw() -> void:
 			draw_texture_centered(enemy_heavy_texture, enemy["pos"], 76.0)
 		elif enemy["type"] == "elite":
 			draw_texture_centered(enemy_heavy_texture, enemy["pos"], 90.0, Color(1.2, 1.0, 0.52, 1.0))
+			var affix_color: Color = {"shield": Color("72f8ff"), "split": Color("64ff9d"), "frenzy": Color("ff476f"), "healer": Color("b6ff70"), "explosive": Color("ff7b3d")}.get(enemy.get("affix", ""), Color.WHITE)
+			draw_arc(enemy["pos"], 36.0, 0.0, TAU, 32, affix_color, 3.0)
+			draw_string(ThemeDB.fallback_font, enemy["pos"] + Vector2(-40, 48), str(enemy.get("affix", "")).to_upper(), HORIZONTAL_ALIGNMENT_CENTER, 80, 10, affix_color)
 		elif enemy["type"] == "fast":
 			draw_texture_centered(enemy_normal_texture, enemy["pos"], 42.0, Color(1.2, 0.62, 0.72, 1.0))
 		else:
@@ -933,10 +1216,12 @@ func _draw() -> void:
 	elif overload_blade_active:
 		fusion_text = "FUSION  Overload Blade"
 	draw_string(ThemeDB.fallback_font, Vector2(24, 184), fusion_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color("ffcf70"))
+	draw_string(ThemeDB.fallback_font, Vector2(24, 208), defense_module_summary(), HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color("91a9c7"))
 	draw_boss_bar()
 	draw_set_transform(Vector2.ZERO)
 	draw_damage_vignette()
 	draw_announcement()
+	draw_tutorial_hint()
 	draw_terminal_prompt()
 
 	if choosing_upgrade:
@@ -951,7 +1236,8 @@ func _draw() -> void:
 		draw_string(ThemeDB.fallback_font, Vector2(0, 300), result_title, HORIZONTAL_ALIGNMENT_CENTER, 1280, 40, result_color)
 		draw_string(ThemeDB.fallback_font, Vector2(0, 350), "Survived %.1f seconds  •  Level %d  •  %d enemies destroyed" % [elapsed, level, kills], HORIZONTAL_ALIGNMENT_CENTER, 1280, 20, Color("d7e8ff"))
 		draw_string(ThemeDB.fallback_font, Vector2(0, 382), "BEST  %.1fs  •  %d kills  •  %d wins / %d runs" % [best_time, best_kills, total_wins, total_runs], HORIZONTAL_ALIGNMENT_CENTER, 1280, 16, Color("9fb2cb"))
-		draw_string(ThemeDB.fallback_font, Vector2(0, 430), "[ R ]  DEPLOY AGAIN     [ Q ]  TITLE", HORIZONTAL_ALIGNMENT_CENTER, 1280, 22, Color("72f8ff"))
+		draw_string(ThemeDB.fallback_font, Vector2(0, 410), "BUILD  Energy %d  •  Arc %d  •  Orbit %d  •  %s" % [energy_level, arc_level, orbit_level, build_fusion_name()], HORIZONTAL_ALIGNMENT_CENTER, 1280, 16, Color("ffcf70"))
+		draw_string(ThemeDB.fallback_font, Vector2(0, 455), "[ R ]  DEPLOY AGAIN     [ Q ]  TITLE", HORIZONTAL_ALIGNMENT_CENTER, 1280, 22, Color("72f8ff"))
 
 func draw_starfield() -> void:
 	draw_rect(Rect2(0, 0, SCREEN.x, SCREEN.y), Color("070b18"))
@@ -973,6 +1259,8 @@ func draw_title_screen() -> void:
 	draw_string(ThemeDB.fallback_font, Vector2(455, 537), "[ ENTER ]  INITIALIZE DEFENSE", HORIZONTAL_ALIGNMENT_CENTER, 370, 20, Color(0.75, 0.96, 1.0, blink))
 	draw_string(ThemeDB.fallback_font, Vector2(0, 585), "RECORD  %.1fs  •  %d kills  •  %d wins / %d runs" % [best_time, best_kills, total_wins, total_runs], HORIZONTAL_ALIGNMENT_CENTER, 1280, 15, Color("91a9c7"))
 	draw_string(ThemeDB.fallback_font, Vector2(0, 620), "MOVE: WASD / ARROWS     •     INTERACT: E     •     ESC TO PAUSE", HORIZONTAL_ALIGNMENT_CENTER, 1280, 14, Color("7185a6"))
+	draw_string(ThemeDB.fallback_font, Vector2(0, 650), "F11 FULLSCREEN  •  M SOUND  •  V SHAKE  •  T REPLAY TRAINING", HORIZONTAL_ALIGNMENT_CENTER, 1280, 13, Color("536985"))
+	draw_string(ThemeDB.fallback_font, Vector2(0, 680), "[1] STANDARD   [2] CORE CRISIS   [3] ENDLESS   //   SELECTED: %s" % selected_mode.to_upper(), HORIZONTAL_ALIGNMENT_CENTER, 1280, 14, Color("ffcf70"))
 
 func draw_damage_vignette() -> void:
 	var danger: float = 1.0 - min(player_hp / player_max_hp, core_hp / 300.0)
@@ -993,12 +1281,66 @@ func draw_announcement() -> void:
 	draw_line(Vector2(350, 271), Vector2(930, 271), Color(0.3, 0.9, 1.0, alpha), 2.0)
 	draw_string(ThemeDB.fallback_font, Vector2(350, 247), announcement_text, HORIZONTAL_ALIGNMENT_CENTER, 580, 24, Color(0.86, 0.98, 1.0, alpha))
 
+func draw_tutorial_hint() -> void:
+	if tutorial_completed or tutorial_step < 0 or game_over or game_paused or choosing_upgrade:
+		return
+	var hint := ""
+	if tutorial_step == 0:
+		hint = "TRAINING 1/4  •  MOVE WITH WASD OR ARROW KEYS"
+	elif tutorial_step == 1:
+		hint = "TRAINING 2/4  •  DEFEAT ENEMIES AND COLLECT GREEN ENERGY"
+	elif tutorial_step == 2:
+		hint = "TRAINING 3/4  •  LEVEL UP AND INSTALL A MODULE"
+	else:
+		hint = "TRAINING 4/4  •  APPROACH A MAP TERMINAL AND PRESS E"
+	draw_rect(Rect2(350, 82, 580, 38), Color(0.02, 0.08, 0.15, 0.90))
+	draw_rect(Rect2(350, 82, 580, 38), Color("4fd9ff"), false, 1.5)
+	draw_string(ThemeDB.fallback_font, Vector2(350, 107), hint, HORIZONTAL_ALIGNMENT_CENTER, 580, 14, Color("dff9ff"))
+
 func draw_pause_menu() -> void:
 	draw_rect(Rect2(0, 0, SCREEN.x, SCREEN.y), Color(0.01, 0.02, 0.06, 0.82))
 	draw_string(ThemeDB.fallback_font, Vector2(0, 285), "DEFENSE PAUSED", HORIZONTAL_ALIGNMENT_CENTER, 1280, 38, Color("dff9ff"))
 	draw_string(ThemeDB.fallback_font, Vector2(0, 345), "[ ENTER / ESC ]  RESUME", HORIZONTAL_ALIGNMENT_CENTER, 1280, 20, Color("72f8ff"))
 	draw_string(ThemeDB.fallback_font, Vector2(0, 386), "[ M ]  SOUND: %s" % ("ON" if sound_enabled else "OFF"), HORIZONTAL_ALIGNMENT_CENTER, 1280, 17, Color("9fb2cb"))
-	draw_string(ThemeDB.fallback_font, Vector2(0, 425), "[ Q ]  RETURN TO TITLE", HORIZONTAL_ALIGNMENT_CENTER, 1280, 17, Color("9fb2cb"))
+	draw_string(ThemeDB.fallback_font, Vector2(0, 421), "[ V ]  SCREEN SHAKE: %s     [ F11 ]  FULLSCREEN" % ("ON" if screen_shake_enabled else "OFF"), HORIZONTAL_ALIGNMENT_CENTER, 1280, 17, Color("9fb2cb"))
+	draw_string(ThemeDB.fallback_font, Vector2(0, 458), "[ Q ]  RETURN TO TITLE", HORIZONTAL_ALIGNMENT_CENTER, 1280, 17, Color("9fb2cb"))
+
+func draw_defense_modules() -> void:
+	for module in defense_modules:
+		var pos: Vector2 = module["pos"]
+		if module["type"].is_empty():
+			draw_circle(pos, 22.0, Color(0.08, 0.13, 0.22, 0.50))
+			draw_arc(pos, 22.0, 0.0, TAU, 24, Color(0.25, 0.38, 0.55, 0.45), 2.0)
+			continue
+		if module["type"] == "turret":
+			draw_circle(pos, 27.0, Color(0.2, 0.9, 1.0, 0.09))
+			draw_circle(pos, 17.0, Color("173659"))
+			draw_colored_polygon(PackedVector2Array([pos + Vector2(0, -18), pos + Vector2(10, 10), pos + Vector2(-10, 10)]), Color("5de1ff"))
+		elif module["type"] == "slow":
+			var effect_range: float = 125.0 + float(module["level"]) * 18.0
+			draw_circle(pos, effect_range, Color(0.45, 0.25, 1.0, 0.035))
+			draw_arc(pos, effect_range, animation_time * 0.25, TAU + animation_time * 0.25, 48, Color(0.55, 0.35, 1.0, 0.20), 2.0)
+			draw_circle(pos, 18.0, Color("3a2466"))
+			draw_arc(pos, 13.0, 0.0, TAU, 20, Color("c06cff"), 4.0)
+		else:
+			draw_circle(pos, 22.0, Color(0.2, 1.0, 0.55, 0.09))
+			draw_circle(pos, 17.0, Color("173d35"))
+			draw_rect(Rect2(pos - Vector2(4, 12), Vector2(8, 24)), Color("64ff9d"))
+			draw_rect(Rect2(pos - Vector2(12, 4), Vector2(24, 8)), Color("64ff9d"))
+		draw_string(ThemeDB.fallback_font, pos + Vector2(-20, 39), "Lv.%d" % module["level"], HORIZONTAL_ALIGNMENT_CENTER, 40, 11, Color("dff9ff"))
+
+func defense_module_summary() -> String:
+	var turret_level := 0
+	var slow_level := 0
+	var repair_level := 0
+	for module in defense_modules:
+		if module["type"] == "turret":
+			turret_level = module["level"]
+		elif module["type"] == "slow":
+			slow_level = module["level"]
+		elif module["type"] == "repair":
+			repair_level = module["level"]
+	return "DEFENSE  Turret %d  •  Stasis %d  •  Repair %d" % [turret_level, slow_level, repair_level]
 
 func draw_arena_features() -> void:
 	for hazard in hazards:
@@ -1054,7 +1396,10 @@ func draw_upgrade_menu() -> void:
 	for i in range(upgrade_options.size()):
 		var rect := Rect2(170 + i * 320, 245, 280, 230)
 		draw_rect(rect, Color("14233d"))
-		draw_rect(rect, Color("4fc9ed"), false, 2.0)
+		var rare: bool = upgrade_options[i].get("rarity", "common") == "rare"
+		draw_rect(rect, Color("ffcf70") if rare else Color("4fc9ed"), false, 4.0 if rare else 2.0)
+		if rare:
+			draw_string(ThemeDB.fallback_font, rect.position + Vector2(180, 35), "RARE", HORIZONTAL_ALIGNMENT_CENTER, 70, 13, Color("ffcf70"))
 		draw_circle(rect.position + Vector2(38, 38), 20.0, Color("27577a"))
 		draw_string(ThemeDB.fallback_font, rect.position + Vector2(31, 45), str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color.WHITE)
 		draw_string(ThemeDB.fallback_font, rect.position + Vector2(24, 102), upgrade_options[i]["name"], HORIZONTAL_ALIGNMENT_LEFT, 232, 24, Color("d9f5ff"))
